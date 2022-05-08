@@ -1,7 +1,6 @@
 from typing import Dict, Any, Set, Tuple, Optional
 from abc import ABC, abstractmethod
 
-
 class RampUp(ABC):
     def __init__(self, length: int, current: int = 0):
         self.current = current

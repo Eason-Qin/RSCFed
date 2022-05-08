@@ -7,7 +7,7 @@ from torch import nn, Tensor
 from torch.nn import functional as F
 
 
-
+# label guessing from mixmatch
 def label_guessing(model: nn.Module, batches_1: Sequence[Tensor], model_type=None) -> Tensor:
     model.eval()
     with torch.no_grad():
@@ -16,6 +16,7 @@ def label_guessing(model: nn.Module, batches_1: Sequence[Tensor], model_type=Non
 
     return mean_prob
 
+# shapen from mixmatch Eqn.2
 def sharpen(x: Tensor, t=0.5) -> Tensor:
     sharpened_x = x ** (1 / t)
     return sharpened_x / sharpened_x.sum(dim=1, keepdim=True)

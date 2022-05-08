@@ -1,6 +1,8 @@
 import copy
 import torch
 
+# FedAvd with different weights settings
+
 def FedAvg(w, client_freq):
     w_avg = copy.deepcopy(w[0])
     # for k in w_avg.keys():
@@ -20,6 +22,7 @@ def FedAvg(w, client_freq):
                 w_avg[key] += w[net_id][key] * ratio[net_id]
     return w_avg
 
+# L2 norm distance between corresponding keys
 
 def model_dist(w_1, w_2):
     assert w_1.keys() == w_2.keys(), "Error: cannot compute distance between dict with different keys"
@@ -30,6 +33,7 @@ def model_dist(w_1, w_2):
 
     return dist_total.cpu().item()
 
+# update alpha in Eqn.4
 
 def update_global_ema(w, ema_w, alpha, global_step):
     alpha = min(1 - 1 / (global_step + 1), alpha)

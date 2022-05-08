@@ -76,8 +76,12 @@ class UnsupervisedLocalUpdate(object):
         self.ramp_up = LinearRampUp(length=self.max_warmup_step)
 
     def train(self, args, net_w, op_dict, epoch, unlabeled_idx, train_dl_local, n_classes):
+        # teacher judge students learn
+        # student's weights
         self.model.load_state_dict(copy.deepcopy(net_w))
         self.model.train()
+
+        # teacher judge
         self.ema_model.eval()
 
         self.model.cuda()
@@ -90,6 +94,7 @@ class UnsupervisedLocalUpdate(object):
 
         self.epoch = epoch
         if self.flag:
+            # load learned teacher
             self.ema_model.load_state_dict(copy.deepcopy(net_w))
             self.flag = False
             logging.info('EMA model initialized')
@@ -107,15 +112,19 @@ class UnsupervisedLocalUpdate(object):
 
             for i, (_, weak_aug_batch, label_batch) in enumerate(train_dl_local):
                 weak_aug_batch = [weak_aug_batch[version].cuda() for version in range(len(weak_aug_batch))]
+
+                # teacher guessing
                 with torch.no_grad():
                     guessed = label_guessing(self.ema_model, [weak_aug_batch[0]], args.model)
                     sharpened = sharpen(guessed)
 
+                # pseudo labeling
                 pseu = torch.argmax(sharpened, dim=1)
                 label = label_batch.squeeze()
                 if len(label.shape) == 0:
                     label = label.unsqueeze(dim=0)
 
+                # a pseudo label beyond confidence threshold considered as a correct one
                 correct_pseu += torch.sum(label[torch.max(sharpened, dim=1)[0] > args.confidence_threshold] == pseu[
                     torch.max(sharpened, dim=1)[0] > args.confidence_threshold].cpu()).item()
                 all_pseu += len(pseu[torch.max(sharpened, dim=1)[0] > args.confidence_threshold])
@@ -127,17 +136,22 @@ class UnsupervisedLocalUpdate(object):
 
                 same_total += sum([pred_label[sam] == pseu[sam] for sam in range(logits_str.shape[0])])
 
+                # Eqn. 3
                 loss_u = torch.sum(losses.softmax_mse_loss(probs_str, sharpened)) / args.batch_size
 
                 ramp_up_value = self.ramp_up(current=self.epoch)
 
+                # ratio of loss on unsup client
                 loss = ramp_up_value * args.lambda_u * loss_u
                 self.optimizer.zero_grad()
                 loss.backward()
+                
+                # clipping gradient
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(),
                                                max_norm=self.max_grad_norm)
                 self.optimizer.step()
 
+                # update alpha in Eqn.4
                 update_ema_variables(self.model, self.ema_model, args.ema_decay, self.iter_num)
 
                 batch_loss.append(loss.item())

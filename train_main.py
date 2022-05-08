@@ -55,12 +55,17 @@ def test(epoch, checkpoint, data_test, label_test, n_classes):
 if __name__ == '__main__':
     args = args_parser()
 
+    # meta info for clients
+    # 1 supervised 
     supervised_user_id = [0]
+    # 9 unsupervised
     unsupervised_user_id = list(range(len(supervised_user_id), args.unsup_num + len(supervised_user_id)))
+
     sup_num = len(supervised_user_id)
     unsup_num = len(unsupervised_user_id)
     total_num = sup_num + unsup_num
 
+    # for loggers
     os.environ['CUDA_VISIBLE_DEVICES'] = args.gpu
     time_current = 'attempt0'
     if args.log_file_name is None:
@@ -82,6 +87,7 @@ if __name__ == '__main__':
     if not os.path.isdir('tensorboard'):
         os.mkdir('tensorboard')
 
+    # dataset configs
     if args.dataset == 'SVHN':
         if not os.path.isdir('tensorboard/SVHN/' + time_current):
             os.mkdir('tensorboard/cares_SVHN/' + time_current)
@@ -109,6 +115,7 @@ if __name__ == '__main__':
     if not os.path.isdir(snapshot_path):
         os.mkdir(snapshot_path)
 
+
     print('==> Reloading data partitioning strategy..')
     assert os.path.isdir('partition_strategy'), 'Error: no partition_strategy directory found!'
 
@@ -119,6 +126,7 @@ if __name__ == '__main__':
         partition = torch.load('partition_strategy/cifar100_noniid_10%labeled.pth')
         net_dataidx_map = partition['data_partition']
 
+    # partitioning dataset in non-iid fashion using dirichlet distribution
     X_train, y_train, X_test, y_test, _, traindata_cls_counts = partition_data_allnoniid(
         args.dataset, args.datadir, partition=args.partition, n_parties=total_num, beta=args.beta)
 
@@ -132,6 +140,8 @@ if __name__ == '__main__':
         n_classes = 100
     elif args.dataset == 'skin':
         n_classes = 7
+
+    # definition of global model
     net_glob = ModelFedCon(args.model, args.out_dim, n_classes=n_classes)
 
     if args.resume:
@@ -149,22 +159,35 @@ if __name__ == '__main__':
     if len(args.gpu.split(',')) > 1:
         net_glob = torch.nn.DataParallel(net_glob, device_ids=[i for i in range(round(len(args.gpu) / 2))])  #
     net_glob.train()
+
+    # for distribution to local clients
     w_glob = net_glob.state_dict()
+    # storages for local clients' weights
     w_locals = []
+    # unsupervised teacher models' weights
     w_ema_unsup = []
+    # trainer for un/labelled clients
     lab_trainer_locals = []
     unlab_trainer_locals = []
+    # net for sup/unsup
     sup_net_locals = []
     unsup_net_locals = []
+    # optimizers for sup/unsup
     sup_optim_locals = []
     unsup_optim_locals = []
 
     dist_scale_f = args.dist_scale
 
+    # total data amount
     total_lenth = sum([len(net_dataidx_map[i]) for i in range(len(net_dataidx_map))])
+
+    # each client's data amount
     each_lenth = [len(net_dataidx_map[i]) for i in range(len(net_dataidx_map))]
+
+    # foreach each_lenth's data proportion 
     client_freq = [len(net_dataidx_map[i]) / total_lenth for i in range(len(net_dataidx_map))]
 
+    # deploy trainers for sup clients
     for i in supervised_user_id:
         lab_trainer_locals.append(SupervisedLocalUpdate(args, net_dataidx_map[i], n_classes))
         w_locals.append(copy.deepcopy(w_glob))
@@ -181,10 +204,13 @@ if __name__ == '__main__':
             optimizer.load_state_dict(checkpoint['sup_optimizers'][i])
         sup_optim_locals.append(copy.deepcopy(optimizer.state_dict()))
 
+    # deploy trainers for unsup clients
     for i in unsupervised_user_id:
         unlab_trainer_locals.append(
             UnsupervisedLocalUpdate(args, net_dataidx_map[i], n_classes))
+        # locals--students
         w_locals.append(copy.deepcopy(w_glob))
+        # with ema--teachers
         w_ema_unsup.append(copy.deepcopy(w_glob))
         unsup_net_locals.append(copy.deepcopy(net_glob))
         if args.opt == 'adam':
@@ -207,19 +233,35 @@ if __name__ == '__main__':
             unlab_trainer_locals[i - sup_num].flag = False
             print('Unsup EMA reloaded')
 
+    # FL officially starting from there
     for com_round in trange(start_epoch, args.rounds):
         print("************* Comm round %d begins *************" % com_round)
+
+        # clients' loss
         loss_locals = []
+        # clients sampled for the round
         clt_this_comm_round = []
+        # sub-consensus models' weights
         w_per_meta = []
 
+        # each meta_round for a sub-consensus model
+
+        # "The number of subsampling operations M and the number of local clients 
+        # used in each sub-sampling operation K are set as: M =3, and K=5." //from Paper Sec.4
         for meta_round in range(args.meta_round):
+            # sample 5 clients
             clt_list_this_meta_round = random.sample(list(range(0, total_num)), args.meta_client_num)
+            # record selected clients
             clt_this_comm_round.extend(clt_list_this_meta_round)
+            # record the sup client if selected.
             chosen_sup = [j for j in supervised_user_id if j in clt_list_this_meta_round]
             logger.info(f'Comm round {com_round} meta round {meta_round} chosen client: {clt_list_this_meta_round}')
+            # record weights for this subcon- 
             w_locals_this_meta_round = []
+
+            # local training
             for client_idx in clt_list_this_meta_round:
+                # supervised one old-fashioned
                 if client_idx in supervised_user_id:
                     local = lab_trainer_locals[client_idx]
                     optimizer = sup_optim_locals[client_idx]
@@ -232,7 +274,6 @@ if __name__ == '__main__':
                     w, loss, op = local.train(args, sup_net_locals[client_idx].state_dict(), optimizer,
                                                            train_dl_local, n_classes)  # network, loss, optimizer
                     writer.add_scalar('Supervised loss on sup client %d' % client_idx, loss, global_step=com_round)
-
                     w_locals_this_meta_round.append(copy.deepcopy(w))
                     sup_optim_locals[client_idx] = copy.deepcopy(op)
                     loss_locals.append(copy.deepcopy(loss))
@@ -244,6 +285,8 @@ if __name__ == '__main__':
                                                                                                  client_idx][
                                                                                                  'param_groups'][0][
                                                                                                  'lr']))
+                
+                # unsupervised -- mean teacher | with ema-> teacher | without ema-> student | students' weights for next step
                 else:
                     local = unlab_trainer_locals[client_idx - sup_num]
                     optimizer = unsup_optim_locals[client_idx - sup_num]
@@ -254,6 +297,7 @@ if __name__ == '__main__':
                                                                     args.datadir, args.batch_size, is_labeled=False,
                                                                     data_idxs=net_dataidx_map[client_idx],
                                                                     pre_sz=args.pre_sz, input_sz=args.input_sz)
+                    # trained for student weights ready to use
                     w, w_ema, loss, op, ratio, correct_pseu, all_pseu, test_right, train_right, test_right_ema, same_pred_num = local.train(
                         args,
                         unsup_net_locals[client_idx - sup_num].state_dict(),
@@ -263,9 +307,13 @@ if __name__ == '__main__':
                         train_dl_local, n_classes)
                     writer.add_scalar('Unsupervised loss on unsup client %d' % client_idx, loss, global_step=com_round)
 
+                    # record student weights
                     w_locals_this_meta_round.append(copy.deepcopy(w))
+                    # record corresp. teacher weights
                     w_ema_unsup[client_idx - sup_num] = copy.deepcopy(w_ema)
+                    # record optimizers
                     unsup_optim_locals[client_idx - sup_num] = copy.deepcopy(op)
+                    # record client loss
                     loss_locals.append(copy.deepcopy(loss))
                     logger.info(
                         'Unlabeled client {} sample num: {} Training loss: {}, unsupervised loss ratio: {}, lr {}, {} pseu out of {} are correct, {} correct by model, {} correct by ema before train, {} by model during train, total {}'.format(
@@ -277,28 +325,40 @@ if __name__ == '__main__':
                                 0]['lr'], correct_pseu, all_pseu, test_right, test_right_ema, train_right,
                             len(net_dataidx_map[client_idx])))
 
+            # data amount for each client in this subset
             each_lenth_this_meta_round = [each_lenth[clt] for clt in clt_list_this_meta_round]
+            # replicate
             each_lenth_this_meta_raw = copy.deepcopy(each_lenth_this_meta_round)
             # total_lenth_this_meta = sum(each_lenth_this_meta_round)
 
+            # following *Federated semi-supervised learning for covid region segmentation in chest ct using multi-national data from china, italy, japan*
+            # "Hence, we re-implement [28], try increased aggregation weight for labeled client from the set {20%, 30%, 50%, 70%}." //from Paper Sec. 4.2
             if args.w_mul_times != 1 and 0 in clt_list_this_meta_round and (
                     args.un_dist == '' or args.un_dist_onlyunsup):  # and com_round<=40:  # :
                 for sup_idx in chosen_sup:
                     each_lenth_this_meta_round[clt_list_this_meta_round.index(sup_idx)] *= args.w_mul_times
 
+            # total data amount in this subset 
+            # N_total in Eqn.5
             total_lenth_this_meta = sum(each_lenth_this_meta_round)
+            # fractions in Eqn.5
             clt_freq_this_meta_round = [i / total_lenth_this_meta for i in each_lenth_this_meta_round]
             print('Based on data amount: ' + f'{clt_freq_this_meta_round}')
             clt_freq_this_meta_raw = copy.deepcopy(clt_freq_this_meta_round)
 
+            # implementation of Eqn.5 | Alg.1 line5
             w_avg_temp = FedAvg(w_locals_this_meta_round, clt_freq_this_meta_round)
+
+            # DMA implementation of Eqn.6 | Alg.1 line6
             dist_list = []
             for cli_idx in range(args.meta_client_num):
-                dist = model_dist(w_locals_this_meta_round[cli_idx], w_avg_temp)
+                dist = model_dist(w_locals_this_meta_round[cli_idx], w_avg_temp) # L2 norm distance in the num of exp 
                 dist_list.append(dist)
             print(
                 'Normed dist * 1e4 : ' + f'{[dist_list[i] * 1e5 / each_lenth_this_meta_raw[i] for i in range(args.meta_client_num)]}')
+            
 
+            # left part of Eqn.6 + weightedmul on sup cli
             if len(chosen_sup) != 0:
                 clt_freq_this_meta_uncer = [
                     np.exp(-dist_list[i] * args.sup_scale / each_lenth_this_meta_raw[i]) * clt_freq_this_meta_round[i] for i
@@ -314,16 +374,21 @@ if __name__ == '__main__':
                     for i
                     in range(args.meta_client_num)]
 
+            # right part of Eqn.6 | normalize the the intra-subset model weight
             total = sum(clt_freq_this_meta_uncer)
             clt_freq_this_meta_dist = [clt_freq_this_meta_uncer[i] / total for i in range(args.meta_client_num)]
             clt_freq_this_meta_round = clt_freq_this_meta_dist
             print('After dist-based uncertainty : ' + f'{clt_freq_this_meta_round}')
 
             assert sum(clt_freq_this_meta_round) - 1.0 <= 1e-3, "Error: sum(freq) != 0"
-            w_this_meta = FedAvg(w_locals_this_meta_round, clt_freq_this_meta_round)
 
+            # Alg.1 line7
+            w_this_meta = FedAvg(w_locals_this_meta_round, clt_freq_this_meta_round)
+            
+            # append this subconsensus model
             w_per_meta.append(w_this_meta)
 
+        # Alg.1 line8 | Eqn.7  fedavg all subconsesus model
         each_lenth_this_round = [each_lenth[clt] for clt in clt_this_comm_round]
 
         if args.w_mul_times != 1 and 0 in clt_this_comm_round:
@@ -335,6 +400,7 @@ if __name__ == '__main__':
             freq = [1 / args.meta_round for i in range(args.meta_round)]
             w_glob = FedAvg(w_per_meta, freq)
 
+        # update and load and test
         net_glob.load_state_dict(w_glob)
         for i in supervised_user_id:
             sup_net_locals[i].load_state_dict(w_glob)
